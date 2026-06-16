@@ -1,7 +1,5 @@
-import asyncio
 import hashlib
 import logging
-import math
 import os
 from typing import Optional
 
@@ -13,69 +11,67 @@ from semantic_tagger.types import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = 'gemini-embedding-2'
-_VOCAB_CONCURRENCY = 20  # max parallel embed_content calls when embedding vocabulary terms
+DEFAULT_VISION_MODEL = 'gemini-2.5-flash'
+DEFAULT_EMBED_MODEL = 'text-embedding-3-small'
+
+_DESCRIBE_PROMPT = (
+    'Analyze this content deeply. Describe its physical composition, but focus heavily on its '
+    'artistic tone, lighting atmosphere, emotional vibe, textures, implicit narrative, and '
+    'cross-modal sensory qualities (e.g., implied temperature, weight, fragrance, loudness). '
+    'Be highly descriptive and evocative.'
+)
 
 
-class GeminiEmbeddingAdapter(AbstractLLMAdapter):
+class GeminiVisionAdapter(AbstractLLMAdapter):
     """
-    Scores vocabulary concepts using Google Gemini multimodal embeddings.
-    Requires: pip install semantic-tagger[gemini]
+    Scores vocabulary concepts for image, video, and audio content.
+    Requires: pip install semantic-tagger[gemini,openai]
 
-    Embeds content and vocabulary terms in Gemini's shared multimodal embedding
-    space, then computes cosine similarity to produce sparse vocab scores.
+    Pipeline for media (ImageContent, VideoContent, AudioContent):
+        1. Gemini 2.5 Flash generates a detailed evocative text description
+        2. OpenAI text-embedding-3-small embeds the description
+        3. Dot product against vocab embeddings (also OpenAI) produces sparse scores
 
-    Supports all content types (TextContent, ImageContent, LinkContent,
-    VideoContent, AudioContent). Image/video/audio require a multimodal-capable
-    model such as gemini-embedding-2.
+    Text and link content skip step 1 and are embedded directly with OpenAI,
+    making this adapter a drop-in replacement for OpenAIEmbeddingAdapter when
+    media support is needed.
 
-    Normalization: all terms with positive cosine similarity are stored, scaled
-    so the highest-scoring term maps to 1.0. No threshold is applied here —
-    filtering by minimum similarity belongs on the search side.
+    Both content and vocab embeddings share OpenAI's embedding space, so
+    similarity scores are meaningful across all content types.
 
-    Vocab embeddings are computed once per unique vocabulary and cached in memory
-    for the lifetime of the adapter instance.
+    Normalization: all terms with positive similarity are stored, scaled so the
+    highest-scoring term maps to 1.0. No threshold — filtering belongs on the search side.
+
+    Vocab embeddings are computed once per unique vocabulary and cached in memory.
     """
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
-        model: str = DEFAULT_MODEL,
+        gemini_api_key: Optional[str] = None,
+        openai_api_key: Optional[str] = None,
+        vision_model: str = DEFAULT_VISION_MODEL,
+        embed_model: str = DEFAULT_EMBED_MODEL,
     ):
-        self._api_key = api_key or os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY')
-        self._model = model
+        self._gemini_key = gemini_api_key or os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY')
+        self._openai_key = openai_api_key or os.environ.get('OPENAI_API_KEY')
+        self._vision_model = vision_model
+        self._embed_model = embed_model
         self._vocab_cache: dict[str, list[list[float]]] = {}
 
     def _vocab_hash(self, vocabulary: list[str]) -> str:
         return hashlib.md5('\x00'.join(vocabulary).encode()).hexdigest()
 
-    async def _get_vocab_embeddings(self, vocabulary: list[str], client) -> list[list[float]]:
+    async def _get_vocab_embeddings(self, vocabulary: list[str], openai_client) -> list[list[float]]:
         key = self._vocab_hash(vocabulary)
-        if key in self._vocab_cache:
-            return self._vocab_cache[key]
-
-        sem = asyncio.Semaphore(_VOCAB_CONCURRENCY)
-
-        async def _embed_term(term: str) -> list[float]:
-            async with sem:
-                resp = await client.aio.models.embed_content(
-                    model=self._model,
-                    contents=[term],
-                )
-                return list(resp.embeddings[0].values)
-
-        all_vecs = list(await asyncio.gather(*[_embed_term(t) for t in vocabulary]))
-        self._vocab_cache[key] = all_vecs
-        return all_vecs
+        if key not in self._vocab_cache:
+            resp = await openai_client.embeddings.create(model=self._embed_model, input=vocabulary)
+            ordered = sorted(resp.data, key=lambda x: x.index)
+            self._vocab_cache[key] = [item.embedding for item in ordered]
+        return self._vocab_cache[key]
 
     @staticmethod
-    def _cosine(a: list[float], b: list[float]) -> float:
-        dot = sum(x * y for x, y in zip(a, b))
-        mag_a = math.sqrt(sum(x * x for x in a))
-        mag_b = math.sqrt(sum(x * x for x in b))
-        if mag_a == 0.0 or mag_b == 0.0:
-            return 0.0
-        return dot / (mag_a * mag_b)
+    def _dot(a: list[float], b: list[float]) -> float:
+        return sum(x * y for x, y in zip(a, b))
 
     @staticmethod
     def _normalize(sims: list[float], vocabulary: list[str]) -> dict[str, float]:
@@ -88,46 +84,29 @@ class GeminiEmbeddingAdapter(AbstractLLMAdapter):
             if sim > 0.0
         }
 
-    async def _embed_content(self, content: ContentItem, client) -> list[float]:
+    async def _describe_media(self, content: ContentItem, gemini_client) -> str:
         from google.genai import types as gtypes
 
-        if isinstance(content, TextContent):
-            resp = await client.aio.models.embed_content(
-                model=self._model,
-                contents=[content.body],
-            )
-            return resp.embeddings[0].values
+        if content.data:  # type: ignore[union-attr]
+            part = gtypes.Part.from_bytes(data=content.data, mime_type=content.media_type)  # type: ignore[union-attr]
+        elif content.url:  # type: ignore[union-attr]
+            part = gtypes.Part.from_uri(uri=content.url, mime_type=content.media_type)  # type: ignore[union-attr]
+        else:
+            raise ValueError(f'{type(content).__name__} requires data or url')
 
-        if isinstance(content, LinkContent):
-            parts = [p for p in [content.title, content.description, content.url] if p]
-            resp = await client.aio.models.embed_content(
-                model=self._model,
-                contents=[' '.join(parts)],
-            )
-            return resp.embeddings[0].values
-
-        if isinstance(content, (ImageContent, VideoContent, AudioContent)):
-            if content.data:
-                part = gtypes.Part.from_bytes(data=content.data, mime_type=content.media_type)
-            elif content.url:
-                part = gtypes.Part.from_uri(uri=content.url, mime_type=content.media_type)
-            else:
-                raise ValueError(f'{type(content).__name__} requires data or url')
-            resp = await client.aio.models.embed_content(
-                model=self._model,
-                contents=[part],
-            )
-            return resp.embeddings[0].values
-
-        raise TypeError(f'Unsupported content type: {type(content).__name__}')
+        resp = await gemini_client.aio.models.generate_content(
+            model=self._vision_model,
+            contents=[part, _DESCRIBE_PROMPT],
+        )
+        return resp.text
 
     async def rank(self, content: ContentItem, vocabulary: list[str]) -> ScoredOutput:
         try:
-            from google import genai
+            from openai import AsyncOpenAI
         except ImportError:
             raise ImportError(
-                'google-genai package is required for GeminiEmbeddingAdapter. '
-                'Install with: pip install semantic-tagger[gemini]'
+                'openai package is required for GeminiVisionAdapter. '
+                'Install with: pip install semantic-tagger[openai]'
             )
 
         if isinstance(content, TextContent):
@@ -142,14 +121,38 @@ class GeminiEmbeddingAdapter(AbstractLLMAdapter):
             content_type = 'LINK'
 
         try:
-            client = genai.Client(api_key=self._api_key)
-            vocab_vecs = await self._get_vocab_embeddings(vocabulary, client)
-            content_vec = await self._embed_content(content, client)
-            sims = [self._cosine(content_vec, v) for v in vocab_vecs]
+            openai_client = AsyncOpenAI(api_key=self._openai_key)
+
+            if isinstance(content, (ImageContent, VideoContent, AudioContent)):
+                try:
+                    from google import genai as google_genai
+                except ImportError:
+                    raise ImportError(
+                        'google-genai package is required for media content. '
+                        'Install with: pip install semantic-tagger[gemini]'
+                    )
+                gemini_client = google_genai.Client(api_key=self._gemini_key)
+                description = await self._describe_media(content, gemini_client)
+                logger.info(
+                    'GeminiVisionAdapter description (%s, %d chars): %s…',
+                    content_type, len(description), description[:120],
+                )
+                input_text = description
+            elif isinstance(content, TextContent):
+                input_text = content.body
+            else:
+                parts = [p for p in [content.title, content.description, content.url] if p]  # type: ignore[union-attr]
+                input_text = ' '.join(parts)
+
+            input_resp = await openai_client.embeddings.create(model=self._embed_model, input=[input_text])
+            input_vec = input_resp.data[0].embedding
+            vocab_vecs = await self._get_vocab_embeddings(vocabulary, openai_client)
+            sims = [self._dot(input_vec, v) for v in vocab_vecs]
             scores = self._normalize(sims, vocabulary)
+
         except Exception as exc:
             logger.exception(
-                'GeminiEmbeddingAdapter.rank failed for content_type=%s: %s', content_type, exc
+                'GeminiVisionAdapter.rank failed for content_type=%s: %s', content_type, exc
             )
             scores = {}
 
