@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import logging
 import math
@@ -13,7 +14,7 @@ from semantic_tagger.types import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = 'gemini-embedding-2'
-_BATCH_SIZE = 100  # items per embed_content call
+_VOCAB_CONCURRENCY = 20  # max parallel embed_content calls when embedding vocabulary terms
 
 
 class GeminiEmbeddingAdapter(AbstractLLMAdapter):
@@ -53,15 +54,17 @@ class GeminiEmbeddingAdapter(AbstractLLMAdapter):
         if key in self._vocab_cache:
             return self._vocab_cache[key]
 
-        all_vecs: list[list[float]] = []
-        for i in range(0, len(vocabulary), _BATCH_SIZE):
-            chunk = vocabulary[i:i + _BATCH_SIZE]
-            resp = await client.aio.models.embed_content(
-                model=self._model,
-                contents=chunk,
-            )
-            all_vecs.extend(e.values for e in resp.embeddings)
+        sem = asyncio.Semaphore(_VOCAB_CONCURRENCY)
 
+        async def _embed_term(term: str) -> list[float]:
+            async with sem:
+                resp = await client.aio.models.embed_content(
+                    model=self._model,
+                    contents=[term],
+                )
+                return list(resp.embeddings[0].values)
+
+        all_vecs = list(await asyncio.gather(*[_embed_term(t) for t in vocabulary]))
         self._vocab_cache[key] = all_vecs
         return all_vecs
 
