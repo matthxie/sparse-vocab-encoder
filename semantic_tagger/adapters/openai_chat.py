@@ -138,7 +138,11 @@ class OpenAIAdapter(AbstractLLMAdapter):
                 if int_score <= 0:
                     continue
                 scores[term] = min(int_score, 127) / 127.0
-        except Exception:
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).exception(
+                "OpenAIAdapter.rank failed for content_type=%s: %s", content_type, exc
+            )
             scores = {}
 
         return ScoredOutput(scores=scores, content_type=content_type)  # type: ignore[arg-type]
