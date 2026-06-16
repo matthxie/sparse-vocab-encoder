@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
-ContentType = Literal['TEXT', 'IMAGE', 'LINK']
+ContentType = Literal['TEXT', 'IMAGE', 'LINK', 'VIDEO', 'AUDIO']
 
 
 @dataclass
@@ -24,7 +24,23 @@ class LinkContent:
     description: Optional[str] = None
 
 
-ContentItem = TextContent | ImageContent | LinkContent
+@dataclass
+class VideoContent:
+    """Provide one of: data (raw video bytes) or url (publicly accessible)."""
+    data: Optional[bytes] = None
+    url: Optional[str] = None
+    media_type: str = 'video/mp4'
+
+
+@dataclass
+class AudioContent:
+    """Provide one of: data (raw audio bytes) or url (publicly accessible)."""
+    data: Optional[bytes] = None
+    url: Optional[str] = None
+    media_type: str = 'audio/mpeg'
+
+
+ContentItem = TextContent | ImageContent | LinkContent | VideoContent | AudioContent
 
 
 @dataclass

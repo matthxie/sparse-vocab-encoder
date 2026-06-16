@@ -4,6 +4,8 @@ from semantic_tagger.types import (
     TextContent,
     ImageContent,
     LinkContent,
+    VideoContent,
+    AudioContent,
     ContentItem,
     TagResult,
     ScoredOutput,
@@ -20,7 +22,7 @@ from semantic_tagger.adapters.base import AbstractLLMAdapter
 __all__ = [
     'SemanticTagger',
     'Vocabulary', 'VocabTerm',
-    'TextContent', 'ImageContent', 'LinkContent', 'ContentItem',
+    'TextContent', 'ImageContent', 'LinkContent', 'VideoContent', 'AudioContent', 'ContentItem',
     'TagResult', 'ScoredOutput',
     'pack_floats_to_bytes', 'unpack_bytes_to_floats', 'pack_sparse_map',
     'pack_scored_concepts', 'pack_ranked_list',

@@ -1,7 +1,7 @@
 import asyncio
 from semantic_tagger.adapters.base import AbstractLLMAdapter
 from semantic_tagger.encoder import pack_scored_concepts
-from semantic_tagger.types import ContentItem, TextContent, ImageContent, TagResult
+from semantic_tagger.types import ContentItem, TextContent, ImageContent, VideoContent, AudioContent, TagResult
 
 Route = tuple[AbstractLLMAdapter, list[str]]
 
@@ -40,10 +40,10 @@ class SemanticTagger:
 
     @staticmethod
     def _content_type(content: ContentItem) -> str:
-        if isinstance(content, TextContent):
-            return 'TEXT'
-        if isinstance(content, ImageContent):
-            return 'IMAGE'
+        if isinstance(content, TextContent): return 'TEXT'
+        if isinstance(content, ImageContent): return 'IMAGE'
+        if isinstance(content, VideoContent): return 'VIDEO'
+        if isinstance(content, AudioContent): return 'AUDIO'
         return 'LINK'
 
     async def encode(self, content: ContentItem) -> TagResult:
