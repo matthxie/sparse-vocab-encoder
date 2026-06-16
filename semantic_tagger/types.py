@@ -49,9 +49,11 @@ class ScoredOutput:
     Direct per-concept scores from an adapter.
     scores: sparse dict — absent concepts are simply omitted (not scored 0.0).
     Values are floats in (0.0, 1.0].
+    caption: LLM-generated summary used as the embedding input, if the adapter produced one.
     """
     scores: dict[str, float]
     content_type: ContentType
+    caption: Optional[str] = None
 
 
 @dataclass
@@ -60,3 +62,4 @@ class TagResult:
     vector: bytes
     scores: dict[str, float]       # the raw scored dict (for inspection/logging)
     content_type: ContentType
+    caption: Optional[str] = None  # LLM summary used as embedding input, if generated

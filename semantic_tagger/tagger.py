@@ -49,14 +49,16 @@ class SemanticTagger:
     async def encode(self, content: ContentItem) -> TagResult:
         content_type = self._content_type(content)
 
+        caption = None
         if self._routes:
             scores = await self._encode_routed(content)
         else:
             output = await self._single_adapter.rank(content, self.vocabulary)  # type: ignore[union-attr]
             scores = output.scores
+            caption = output.caption
 
         vector = pack_scored_concepts(scores, self.vocabulary)
-        return TagResult(vector=vector, scores=scores, content_type=content_type)  # type: ignore[arg-type]
+        return TagResult(vector=vector, scores=scores, content_type=content_type, caption=caption)  # type: ignore[arg-type]
 
     async def _encode_routed(self, content: ContentItem) -> dict[str, float]:
         tasks = [adapter.rank(content, sub_vocab) for adapter, sub_vocab in self._routes]
