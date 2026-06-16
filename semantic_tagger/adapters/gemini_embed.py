@@ -12,7 +12,7 @@ from semantic_tagger.types import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = 'gemini-embedding-exp-03-07'
+DEFAULT_MODEL = 'gemini-embedding-2'
 _BATCH_SIZE = 100  # items per embed_content call
 
 
