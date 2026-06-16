@@ -17,50 +17,57 @@ skip_unless_integration = pytest.mark.skipif(
 
 
 @skip_unless_integration
-async def test_text_astrophotography():
+async def test_text_astrophotography_high_score():
     adapter = ClaudeAdapter()
     result = await adapter.rank(
-        TextContent(body="night sky long exposure"),
+        TextContent(body="night sky long exposure stars milky way"),
         vocabulary=["astrophotography", "urban", "food"],
     )
-    assert result.ranked_concepts[0] == "astrophotography"
+    # astrophotography should be in the top tier (high score)
+    assert "astrophotography" in result.scores
+    assert result.scores["astrophotography"] > result.scores.get("urban", 0)
+    assert result.scores["astrophotography"] > result.scores.get("food", 0)
 
 
 @skip_unless_integration
-async def test_link_street_before_nature():
+async def test_link_street_higher_than_nature():
     adapter = ClaudeAdapter()
     result = await adapter.rank(
         LinkContent(url="https://example.com", title="Tokyo street photography at night"),
         vocabulary=["architecture", "street", "nature", "food"],
     )
-    assert "street" in result.ranked_concepts
-    assert "nature" in result.ranked_concepts
-    assert result.ranked_concepts.index("street") < result.ranked_concepts.index("nature")
+    assert result.scores.get("street", 0) > result.scores.get("nature", 0)
 
 
 @skip_unless_integration
-async def test_malformed_json_returns_empty():
-    from unittest.mock import AsyncMock, patch, MagicMock
+async def test_scores_normalized_to_float():
+    adapter = ClaudeAdapter()
+    result = await adapter.rank(
+        TextContent(body="a beautiful sunset over the ocean"),
+        vocabulary=["nature", "urban", "food"],
+    )
+    for term, score in result.scores.items():
+        assert 0.0 < score <= 1.0, f"{term} score {score} out of range"
+
+
+async def test_malformed_json_returns_empty_scores():
+    """Non-integration: verifies the fallback path returns empty scores without raising."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    mock_content = MagicMock()
+    mock_content.text = "not valid json {{"
 
     mock_response = MagicMock()
-    mock_response.content = [MagicMock(text="not valid json {{ ")]
+    mock_response.content = [mock_content]
 
-    adapter = ClaudeAdapter()
-    with patch.object(adapter, '_get_client') as _:
-        # Directly test the fallback by patching the internal client creation
-        pass
+    adapter = ClaudeAdapter(api_key="fake-key")
 
-    # Test via a stub that injects a bad response
-    class BadResponseAdapter(ClaudeAdapter):
-        async def rank(self, content, vocabulary):
-            try:
-                import json
-                json.loads("not valid json {{ ")
-            except Exception:
-                pass
-            from semantic_tagger.types import RankedOutput
-            return RankedOutput(ranked_concepts=[], content_type='TEXT')
+    with patch("anthropic.AsyncAnthropic") as MockAnthropic:
+        instance = MockAnthropic.return_value
+        instance.messages.create = AsyncMock(return_value=mock_response)
+        result = await adapter.rank(
+            TextContent(body="test"),
+            vocabulary=["a", "b"],
+        )
 
-    bad = BadResponseAdapter()
-    result = await bad.rank(TextContent(body="test"), vocabulary=["a", "b"])
-    assert result.ranked_concepts == []
+    assert result.scores == {}

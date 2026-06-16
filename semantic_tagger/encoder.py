@@ -39,6 +39,16 @@ def pack_sparse_map(scores: dict[int, float], vocab_size: int) -> bytes:
     return pack_floats_to_bytes(floats)
 
 
+def pack_scored_concepts(scores: dict[str, float], vocabulary: list[str]) -> bytes:
+    """
+    scores: { concept_name: float_score } — sparse, absent concepts omitted.
+    Maps concept names to their vocabulary index positions.
+    Output length == len(vocabulary).
+    """
+    floats: list[float | None] = [scores.get(term) for term in vocabulary]
+    return pack_floats_to_bytes(floats)
+
+
 def pack_ranked_list(
     ranked_concepts: list[str],
     vocabulary: list[str],

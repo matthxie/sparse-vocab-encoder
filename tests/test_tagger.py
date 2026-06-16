@@ -1,47 +1,45 @@
 import asyncio
 import pytest
 from semantic_tagger.adapters.base import AbstractLLMAdapter
-from semantic_tagger.types import TextContent, ImageContent, RankedOutput
+from semantic_tagger.types import TextContent, ImageContent, ScoredOutput
 from semantic_tagger.tagger import SemanticTagger
 
 
 class MockAdapter(AbstractLLMAdapter):
-    def __init__(self, ranked: list[str]):
-        self._ranked = ranked
+    def __init__(self, scores: dict[str, float]):
+        self._scores = scores
 
-    async def rank(self, content, vocabulary) -> RankedOutput:
+    async def rank(self, content, vocabulary) -> ScoredOutput:
         ct = 'TEXT' if isinstance(content, TextContent) else 'IMAGE'
-        return RankedOutput(ranked_concepts=self._ranked, content_type=ct)
+        # Return only scores for terms in the requested vocabulary
+        filtered = {k: v for k, v in self._scores.items() if k in vocabulary}
+        return ScoredOutput(scores=filtered, content_type=ct)
 
 
 VOCAB = ["astrophotography", "urban", "food", "nature"]
 
 
 async def test_encode_returns_tag_result():
-    adapter = MockAdapter(["astrophotography", "urban"])
+    adapter = MockAdapter({"astrophotography": 1.0, "urban": 0.5})
     tagger = SemanticTagger(vocabulary=VOCAB, adapter=adapter)
     result = await tagger.encode(TextContent(body="night sky"))
     assert result.content_type == 'TEXT'
-    assert result.ranked_concepts == ["astrophotography", "urban"]
+    assert result.scores == {"astrophotography": 1.0, "urban": 0.5}
     assert len(result.vector) == len(VOCAB)
 
 
 async def test_encode_correct_vector_bytes():
-    # ranked = ["astrophotography", "urban"], vocab has 4 terms
-    # rank 0: astro  → weight 1.0 - 0/2 = 1.0 → 0xFF
-    # rank 1: urban  → weight 1.0 - 1/2 = 0.5 → 0x80 | round(63.5) = 0xC0
-    # food absent → 0x00, nature absent → 0x00
-    adapter = MockAdapter(["astrophotography", "urban"])
+    adapter = MockAdapter({"astrophotography": 1.0, "urban": 0.5})
     tagger = SemanticTagger(vocabulary=VOCAB, adapter=adapter)
     result = await tagger.encode(TextContent(body="test"))
-    assert result.vector[0] == 0xFF   # astrophotography
-    assert result.vector[1] == 0xC0   # urban
-    assert result.vector[2] == 0x00   # food
-    assert result.vector[3] == 0x00   # nature
+    assert result.vector[0] == 0xFF                      # astrophotography → 1.0
+    assert result.vector[1] == 0x80 | round(0.5 * 127)  # urban → 0.5
+    assert result.vector[2] == 0x00                      # food → absent
+    assert result.vector[3] == 0x00                      # nature → absent
 
 
 async def test_encode_batch_order_preserved():
-    adapter = MockAdapter(["astrophotography"])
+    adapter = MockAdapter({"astrophotography": 1.0})
     tagger = SemanticTagger(vocabulary=VOCAB, adapter=adapter)
     items = [TextContent(body=str(i)) for i in range(5)]
     results = await tagger.encode_batch(items, concurrency=2)
@@ -55,13 +53,13 @@ async def test_encode_batch_concurrency_limit():
     max_concurrent = 0
 
     class CountingAdapter(AbstractLLMAdapter):
-        async def rank(self, content, vocabulary) -> RankedOutput:
+        async def rank(self, content, vocabulary) -> ScoredOutput:
             nonlocal concurrent_count, max_concurrent
             concurrent_count += 1
             max_concurrent = max(max_concurrent, concurrent_count)
             await asyncio.sleep(0.01)
             concurrent_count -= 1
-            return RankedOutput(ranked_concepts=[], content_type='TEXT')
+            return ScoredOutput(scores={}, content_type='TEXT')
 
     tagger = SemanticTagger(vocabulary=VOCAB, adapter=CountingAdapter())
     items = [TextContent(body=str(i)) for i in range(10)]
@@ -69,20 +67,55 @@ async def test_encode_batch_concurrency_limit():
     assert max_concurrent <= 3
 
 
-async def test_vocab_term_not_in_ranked_is_zero():
-    adapter = MockAdapter(["astrophotography"])
+async def test_vocab_term_not_in_scores_is_zero():
+    adapter = MockAdapter({"astrophotography": 1.0})
     tagger = SemanticTagger(vocabulary=VOCAB, adapter=adapter)
     result = await tagger.encode(TextContent(body="test"))
-    # urban, food, nature not in ranked → 0x00
-    assert result.vector[1] == 0x00
-    assert result.vector[2] == 0x00
-    assert result.vector[3] == 0x00
+    assert result.vector[1] == 0x00  # urban
+    assert result.vector[2] == 0x00  # food
+    assert result.vector[3] == 0x00  # nature
 
 
-async def test_ranked_term_not_in_vocab_ignored():
-    # "galaxy" is not in VOCAB — should not raise
-    adapter = MockAdapter(["galaxy", "astrophotography"])
+async def test_scores_term_not_in_vocab_ignored():
+    # "galaxy" is not in VOCAB — adapter returns it, tagger should ignore
+    adapter = MockAdapter({"galaxy": 1.0, "astrophotography": 0.8})
     tagger = SemanticTagger(vocabulary=VOCAB, adapter=adapter)
     result = await tagger.encode(TextContent(body="test"))
-    # astrophotography is rank 1 (after galaxy), weight = 1 - 1/2 = 0.5
-    assert result.vector[0] == 0x80 | round(0.5 * 127)
+    assert result.vector[0] == 0x80 | round(0.8 * 127)  # astrophotography
+    assert result.vector[1] == 0x00                      # urban absent
+
+
+async def test_hybrid_routes_merge():
+    """Routes: two adapters for disjoint vocab subsets, results merged into one vector."""
+    clip_adapter = MockAdapter({"astrophotography": 1.0, "nature": 0.7})
+    llm_adapter = MockAdapter({"urban": 0.9, "food": 0.3})
+
+    tagger = SemanticTagger(
+        vocabulary=VOCAB,
+        routes=[
+            (clip_adapter, ["astrophotography", "nature"]),
+            (llm_adapter, ["urban", "food"]),
+        ],
+    )
+    result = await tagger.encode(TextContent(body="test"))
+    assert result.vector[0] == 0x80 | round(1.0 * 127)  # astrophotography
+    assert result.vector[1] == 0x80 | round(0.9 * 127)  # urban
+    assert result.vector[2] == 0x80 | round(0.3 * 127)  # food
+    assert result.vector[3] == 0x80 | round(0.7 * 127)  # nature
+
+
+async def test_hybrid_routes_overlap_averaged():
+    """Overlapping routes: scores for the same term are averaged."""
+    adapter_a = MockAdapter({"astrophotography": 1.0})
+    adapter_b = MockAdapter({"astrophotography": 0.5})
+
+    tagger = SemanticTagger(
+        vocabulary=VOCAB,
+        routes=[
+            (adapter_a, ["astrophotography"]),
+            (adapter_b, ["astrophotography"]),
+        ],
+    )
+    result = await tagger.encode(TextContent(body="test"))
+    expected = 0x80 | round(0.75 * 127)  # average of 1.0 and 0.5
+    assert result.vector[0] == expected

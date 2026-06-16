@@ -3,6 +3,7 @@ from semantic_tagger.encoder import (
     pack_floats_to_bytes,
     unpack_bytes_to_floats,
     pack_sparse_map,
+    pack_scored_concepts,
     pack_ranked_list,
 )
 
@@ -35,6 +36,18 @@ def test_round_trip():
 
 def test_pack_sparse_map():
     assert pack_sparse_map({2: 1.0}, vocab_size=4) == b'\x00\x00\xff\x00'
+
+
+def test_pack_scored_concepts():
+    # "a" → 1.0 → 0xFF, "b" → 0.5 → 0xC0, "c" absent → 0x00
+    result = pack_scored_concepts({"a": 1.0, "b": 0.5}, ["a", "b", "c"])
+    assert result[0] == 0xFF
+    assert result[1] == 0x80 | round(0.5 * 127)
+    assert result[2] == 0x00
+
+
+def test_pack_scored_concepts_empty():
+    assert pack_scored_concepts({}, ["a", "b"]) == b'\x00\x00'
 
 
 def test_pack_ranked_list_basic():
