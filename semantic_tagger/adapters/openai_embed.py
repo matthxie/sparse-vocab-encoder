@@ -17,29 +17,18 @@ class OpenAIEmbeddingAdapter(AbstractLLMAdapter):
     lifetime of the adapter instance. On a cold start (first encode call) one extra API
     request is made to embed the full vocabulary; subsequent calls only embed the input.
 
-    Normalization:
-        Raw cosine similarities (dot products on L2-normalized vectors) are clipped at
-        `threshold` (default 0.15). Terms below the threshold are marked absent (0x00).
-        Terms at or above the threshold are linearly scaled so the highest-scoring term
-        in the response maps to 1.0. This gives relative importance across the vocabulary.
-
-        For absolute scores (recommended in production), supply calibration data via
-        the `calibration` parameter: {term: (floor_sim, ceiling_sim)} derived from the
-        10th/90th percentile of observed scores for each term over a representative corpus.
+    Normalization: all terms with positive cosine similarity are stored, scaled so
+        the highest-scoring term maps to 1.0. No threshold is applied here — filtering
+        by minimum similarity belongs on the search side.
     """
 
     def __init__(
         self,
         api_key: Optional[str] = None,
         model: str = 'text-embedding-3-small',
-        threshold: float = 0.15,
-        calibration: Optional[dict[str, tuple[float, float]]] = None,
     ):
         self._api_key = api_key or os.environ.get('OPENAI_API_KEY')
         self._model = model
-        self._threshold = threshold
-        self._calibration = calibration or {}
-        # Cache: vocab_hash → list of per-term embedding vectors
         self._vocab_cache: dict[str, list[list[float]]] = {}
 
     def _vocab_hash(self, vocabulary: list[str]) -> str:
@@ -60,28 +49,16 @@ class OpenAIEmbeddingAdapter(AbstractLLMAdapter):
         # OpenAI embeddings are L2-normalized, so dot product == cosine similarity
         return sum(x * y for x, y in zip(a, b))
 
-    def _normalize(self, sims: list[float], vocabulary: list[str]) -> dict[str, float]:
-        if self._calibration:
-            scores: dict[str, float] = {}
-            for term, sim in zip(vocabulary, sims):
-                if term in self._calibration:
-                    floor, ceiling = self._calibration[term]
-                    if sim <= floor:
-                        continue
-                    scores[term] = min((sim - floor) / (ceiling - floor), 1.0)
-                else:
-                    if sim > self._threshold:
-                        scores[term] = float(min(sim, 1.0))
-            return scores
-
+    @staticmethod
+    def _normalize(sims: list[float], vocabulary: list[str]) -> dict[str, float]:
         max_sim = max(sims) if sims else 0.0
-        if max_sim <= self._threshold:
+        if max_sim <= 0.0:
             return {}
-        scores = {}
-        for term, sim in zip(vocabulary, sims):
-            if sim > self._threshold:
-                scores[term] = (sim - self._threshold) / (max_sim - self._threshold)
-        return scores
+        return {
+            term: sim / max_sim
+            for term, sim in zip(vocabulary, sims)
+            if sim > 0.0
+        }
 
     async def rank(
         self,
